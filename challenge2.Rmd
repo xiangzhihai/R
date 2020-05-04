@@ -1,0 +1,342 @@
+---
+title: "Data challenge Section 1"
+author: "Shuhua He"
+date: "May 1, 2020"
+geometry: margin=2cm
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE)
+```
+
+### Case Fatality Rate (CFR) of COVID-19
+
+By May 2020, more than 1 million of confirmed COVID-19 cases and 60k deaths have been reported by the Johns Hopkins University Coronavirus Resources Center. The early detection of the most relevant factors of deaths due to COVID-19 on U.S. county-level can aid in making decisions on lifestyle changes in high risk patients, distribution of public resources, and in turn reduce the CFR. This study aims to explore the most relevant health factors related to COVID-19 deaths as well as predict the overall risk using logistic regression.
+
+The case fatality rate (CFR) will be used to measure the risk of dying from COVID-19, which is defined as
+$$
+\frac{\text{number of deaths from disease}}{\text{number of diagnosed cases of disease}}
+$$
+
+### Data Cleaning and Preparation
+
+This project involves two different datasets: one includes COVID-19 cases and deaths, another one includes health-related factors on county levels.
+
+- `04-04-2020.csv.gz`: The COVID-19 data contain information about confirmed cases and deaths on 2020-04-04; retrieved from [Johns Hopkins COVID-19 data repository](https://github.com/CSSEGISandData/COVID-19). It is avaliable from this [link](https://github.com/CSSEGISandData/COVID-19) (commit 0174f38).
+
+- `us-county-health-rankings-2020.csv.gz`: The 2020 County Health Ranking Data was released by [County Health Rankings](https://www.countyhealthrankings.org). The data is avaliable from the [Kaggle Uncover COVID-19 Challenge](https://www.kaggle.com/roche-data-science-coalition/uncover) (version 1).
+
+Since both dataset contain various information on COVID-19 and we may not be interested in some of the variables, we will first perform necessary data cleaning to only include the desired variables.
+
+```{r include=FALSE}
+# COVID-19 cases and deaths
+library(tidyverse)
+library(dplyr)
+county_covid <- read_csv("~/Desktop/data incubator challenge s1/04-04-2020.csv") %>%
+  mutate(FIPS = as.numeric(FIPS)) %>%
+  filter(Country_Region == "US") %>%
+  print(width = Inf)
+
+names(county_covid) <- str_to_lower(names(county_covid)) # Standardize all variable names to lower case
+
+county_covid %>%
+  dplyr::select(province_state) %>%
+  distinct() %>%
+  arrange(province_state) %>%
+  print(n = Inf) # unique US states and territories
+
+county_covid <- county_covid %>%
+  filter(!(province_state %in% c("Diamond Princess", "Grand Princess", 
+                                 "Recovered", "Guam", "Northern Mariana Islands", 
+                                 "Puerto Rico", "Virgin Islands"))) %>%
+  print(width = Inf) # exclude counties that not from 50 states and DC
+```
+
+Graphical summarize the COVID-19 confirmed cases and deaths on 2020-04-04 by state.
+```{r echo = FALSE}
+county_covid %>%
+  pivot_longer(confirmed:recovered, 
+               names_to = "case", 
+               values_to = "count") %>%
+  group_by(province_state) %>%
+  ggplot() + 
+  geom_col(mapping = aes(x = province_state, y = `count`, fill = `case`)) + 
+  labs(title = "US COVID-19 Situation on 2020-04-04", x = "State") + 
+  theme(axis.text.x = element_text(angle = 90))
+
+# For stability when running logistic model, we restrict to counties with more than 5 confirmed cases.
+county_covid <- county_covid %>%
+  filter(confirmed >= 5)
+```
+
+```{r include=FALSE}
+# 2020 county-level health ranking data
+# Some variables are removed due to missing data
+county_info <- read_csv("~/Desktop/data incubator challenge s1/us-county-health-rankings-2020.csv") %>%
+  filter(!is.na(county)) %>%
+  mutate(fips = as.numeric(fips)) %>%
+  dplyr::select(fips, 
+         state,
+         county,
+         percent_fair_or_poor_health, 
+         percent_smokers, 
+         percent_adults_with_obesity, 
+         percent_with_access_to_exercise_opportunities, 
+         percent_excessive_drinking,
+         #life_expectancy,
+         #age_adjusted_death_rate,
+         percent_adults_with_diabetes,
+         #hiv_prevalence_rate,
+         #percent_limited_access_to_healthy_foods,
+         percent_insufficient_sleep,
+         percent_less_than_18_years_of_age,
+         percent_65_and_over,
+         percent_black,
+         percent_asian,
+         percent_hispanic,
+         percent_female) %>%
+  print(width = Inf)
+```
+
+```{r include=FALSE}
+# use FIPS (Federal Information Processing System) as a key to combine the COVID-19 count data with county-level information
+county_info <- county_info %>% mutate(fips = as.numeric(fips))
+county_covid <- county_covid %>% mutate(fips = as.numeric(fips))
+county_data <- county_covid %>%
+  left_join(county_info, by = "fips") %>%
+  print(width = Inf)
+# Numerical summaries of each variable:
+# summary(county_data)
+
+# detect unmatched rows
+county_data %>%
+  filter(is.na(state) & is.na(county)) %>%
+  print(n = Inf)
+
+# Some rows are missing 'fips'
+county_covid %>%
+  filter(is.na(fips)) %>%
+  dplyr::select(fips, admin2, province_state) %>%
+  print(n = Inf)
+
+# (a) manually label `fips` for some counties, (b) discard any meaningless values, such as `Unassigned`, `unassigned` or `Out of`, and (c) try to combine with `county_info` again.
+county_data <- county_covid %>%
+  # manually set FIPS for some counties
+  mutate(fips = ifelse(admin2 == "DeKalb" & province_state == "Tennessee", 47041, fips)) %>%
+  mutate(fips = ifelse(admin2 == "DeSoto" & province_state == "Florida", 12027, fips)) %>%
+  #mutate(fips = ifelse(admin2 == "Dona Ana" & province_state == "New Mexico", 35013, fips)) %>% 
+  mutate(fips = ifelse(admin2 == "Dukes and Nantucket" & province_state == "Massachusetts", 25019, fips)) %>% 
+  mutate(fips = ifelse(admin2 == "Fillmore" & province_state == "Minnesota", 27045, fips)) %>%  
+  #mutate(fips = ifelse(admin2 == "Harris" & province_state == "Texas", 48201, fips)) %>%  
+  #mutate(fips = ifelse(admin2 == "Kenai Peninsula" & province_state == "Alaska", 2122, fips)) %>%  
+  mutate(fips = ifelse(admin2 == "LaSalle" & province_state == "Illinois", 17099, fips)) %>%
+  #mutate(fips = ifelse(admin2 == "LaSalle" & province_state == "Louisiana", 22059, fips)) %>%
+  #mutate(fips = ifelse(admin2 == "Lac qui Parle" & province_state == "Minnesota", 27073, fips)) %>%  
+  mutate(fips = ifelse(admin2 == "Manassas" & province_state == "Virginia", 51683, fips)) %>%
+  #mutate(fips = ifelse(admin2 == "Matanuska-Susitna" & province_state == "Alaska", 2170, fips)) %>%
+  mutate(fips = ifelse(admin2 == "McDuffie" & province_state == "Georgia", 13189, fips)) %>%
+  #mutate(fips = ifelse(admin2 == "McIntosh" & province_state == "Georgia", 13191, fips)) %>%
+  #mutate(fips = ifelse(admin2 == "McKean" & province_state == "Pennsylvania", 42083, fips)) %>%
+  mutate(fips = ifelse(admin2 == "Weber" & province_state == "Utah", 49057, fips)) %>%
+  filter(!(is.na(fips) | str_detect(admin2, "Out of") | str_detect(admin2, "Unassigned"))) %>%
+  left_join(county_info, by = "fips") %>% # join info to county_info
+  print(width = Inf)
+
+# summary(county_data) 
+# go back and exclude variables with a lot of missing valus
+# end of data cleaning
+```
+
+Below is the final dataframe for future analysis:
+```{r echo = FALSE, message=FALSE}
+county_data <- county_data %>%
+  mutate(state = as.factor(state)) %>%
+  dplyr::select(fips,county, confirmed, deaths, state, percent_fair_or_poor_health:percent_female)
+summary(county_data)
+```
+The 5 counties with highest CFR are:
+```{r echo = FALSE}
+county_data %>%
+  mutate(cfr = deaths / confirmed) %>%
+  select(county, state, confirmed, deaths, cfr) %>%
+  arrange(desc(cfr)) %>%
+  top_n(3)
+```
+
+
+### Logistic Regression Assumption Check  
+
+Before building the logistic model, we want to check several assumptions about the data and make sure the use of logistic regression model is appropriate. Three types of assumptions are checked: linearity, influential values, and multicollinarity.
+
+```{r echo=FALSE, fig.show='asis', warning=FALSE, out.width="50%"}
+# linearity assumtion check
+
+linearity_data <- county_data %>% # Creat a temporary dataset for logistic linearity assumtion check 
+  dplyr::select_if(is.numeric) 
+predictors <- colnames(linearity_data) # Select only numeric predictors
+# Bind the logit and tidying the data for plot
+probabilities <- linearity_data$deaths / linearity_data$confirmed
+linearity_data <- linearity_data %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit) # Bind the logit and tidying the data for plot
+ggplot(linearity_data, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y") # generate graphs
+
+# influential value check
+lcovid <- glm(cbind(deaths, confirmed - deaths) ~ .-county -state, family = binomial, data = county_data)
+plot(lcovid, which = 4, id.n = 3)
+```
+
+```{r include=FALSE}
+# Multicollinearity check: whether the data contain highly correlated predictor variables
+library(car)
+car::vif(lcovid)
+```
+
+All assumptions hold true for our data. 
+The first graoh shows that there is a linear relationship between the logit of the outcome and each predictor variables.
+The second graph shows that There may be some influential values (extreme values or outliers) in the continuous predictors. For example, New York has a relative greater number of deaths than other counties. After investigating these counties, there is no other apparent problems with them, and we decide to still include them in analysis.  
+Furthurmore, there is no high intercorrelations (i.e. multicollinearity) among the predictors.
+Therefore, we may continue to use logistic regression.
+
+### Prediction: Logistic Regression
+
+One of our primary interests is to predict COVID-19 death and pinpoint the most relevant factors of it. Logistic regression is usually used for prediction of outcome of a binomial dependent variable from a set of predictors. Logistic regression will also provide the risk of dying from COVID-19 measured by CFR.
+
+```{r warning=FALSE, echo=FALSE, message=FALSE}
+library(gtsummary)
+lcovid <- glm(cbind(deaths, confirmed - deaths) ~ .-county -state, family = binomial, data = county_data)
+lcovid %>%
+  tbl_regression(intercept = TRUE,exponentiate = TRUE) %>%
+  bold_labels() %>%
+  bold_p(t=0.01) %>% # bold significant predictors with p-value <0.01
+  sort_p() %>%
+  as_kable()
+```
+
+### Goodness of fit check 
+
+After obtaining the model, we would like to know if it is the most edquate model for both describing our data and generalizing to other data. Goodness of fit check help us understand how well the logistic model fitting the data by comparing deviance between (a) our model vs saturated model and (b) our model vs null/intercept-only model. 
+
+```{r warning=FALSE, echo=FALSE, message=FALSE}
+# Compare to the saturated model:
+pchisq(lcovid$deviance, lcovid$df.residual, lower = FALSE)
+
+# Compare to the null model:
+lcovid_io <- glm(cbind(deaths, confirmed - deaths) ~ 1, family = binomial, data = county_data)
+pchisq(lcovid$null.deviance - lcovid$deviance, lcovid$df.null-lcovid$df.residual, lower.tail = FALSE)
+```
+(a) For the comparison of the saturated model, the goodness of fit test results in a small p-value, in which we reject the $H_o$ and conclude that our logistic model provides poorer fit than the saturated model.
+(b) For the comparison of the null model, the goodness of fit test results in a small p-value, in which we reject the $H_o$ and conclude that our logistic model provides a better fit than the intercept-only model here. 
+
+In conclusion, our model explains some of the important features of COVID-19 death rate, but there is a room for improvement to fit the data better. Therefore, we would like to try implement some model selection methods.
+
+Based on the analysis of deviance, the 5 most significant predictors are shown below
+```{r warning=FALSE, echo=FALSE, message=FALSE}
+most_sig <- drop1(lcovid, test = "Chi")
+kableExtra::kable(head(most_sig[order(most_sig$'Pr(>Chi)'),], n=5,digits(2)))
+```
+
+### Model Selection
+The following methods will be implemented with different approaches and focus: (a) Akaike information criterion (AIC) (b) lasso with cross validation.
+
+Perform sequential search using AIC.  
+The best sub-model given by the AIC criterion is:
+```{r include=FALSE}
+smalllm <- step(lcovid, trace = TRUE, direction = "both")
+#stepAIC(lcovid,direction = "both")
+```
+
+
+```{r warning=FALSE, echo=FALSE, message=FALSE}
+library(gt)
+smalllm %>%
+  tbl_regression(intercept = TRUE,exponentiate = TRUE) %>%
+  bold_labels() %>%
+  bold_p(t=0.001) %>%
+  sort_p() %>%
+  as_gt()
+```
+  
+  
+The best sub-model given by lasso with cross validation (using the AUC criteria) is:  
+```{r include=FALSE}
+library(glmnet)
+library(caret)
+
+# Create a matrix (of predictors) and a vector (of responses) as input.
+x <- model.matrix(
+  cbind(deaths, confirmed - deaths) ~ . -1 - county -state - confirmed - deaths,
+  data = county_data
+)
+y <- cbind(county_data$deaths, county_data$confirmed - county_data$deaths)
+
+# Use cross validation to help choose the model:
+set.seed(200)
+cv_lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial", 
+                      type.measure = "auc") # using AUC
+
+# Generate the exact value of lambda and corresponding model
+cv_lasso$lambda.min # optimal lambda
+coef(cv_lasso, cv_lasso$lambda.min) # best sub-model, suggest include all
+```
+The model given by lasso with cross validation (using the AUC criteria) suggest to include all the predictor in the model, which is similar as the initial logistic model. 
+
+Again, compare the initial logistic model to the AIC model:
+```{r echo=FALSE, warning =FALSE,message=FALSE, fig.show='asis', out.width="50%"}
+lcovid %>%
+  tbl_regression(intercept = TRUE,exponentiate = TRUE) %>%
+  bold_labels() %>%
+  bold_p(t=0.001) %>% 
+  sort_p() %>%
+  as_gt()
+```
+
+While each model emphasizes different aspect of analyzing the data, several predictors are consistently significant acroos all models. 
+
+
+### Interpretations
+
+The following variables are the most significant county-level predictors to COVID-19 CFR, suggested by the models.
+
+* For one unit increase in the percentage of Asian, the odds of dying from COVID-19 increased by 1.03, or 3%, holding all other features constant.
+* Similarily, for one unit increase in the percentage of less than 18 years old, the odds of dying from COVID-19 reduced by 6%.
+* For one unit increase in the percentage of hispanic, the odds of dying from COVID-19 reduced by 1%.
+* For one unit increase in the percentage of people have fair or poor health, the odds of dying from COVID-19 increaed by 5%.
+* For one unit increase in the percentage of adults with obesity, the odds of dying from COVID-19 increaed by 3%.
+
+
+### Potential Limitations
+
+The potential limitation of the study is discussed from 3 aspects;
+
+- (a) CFR measurement
+- (b) Unselected predictors
+- (c) Logistic assumption violation
+
+
+(a) CFR measurement  
+Again, CFR is defined as:
+$$
+\frac{\text{number of deaths from disease}}{\text{number of diagnosed cases of disease}}.
+$$
+Note that there are some limitations on using CFR to measure COVID-19 deaths rate. CFR assumes the reported deaths and confirmed cases are reflecting the actual information associated with the disease. COVID-19 has prolonged progression and lasts longer than other acute disease. During the long duration from being diagnosed to death, people is likely to die from another disease but still be counted as death due to COVID-19, which leads to an overestimate CFR. It would be more accurate to include this timeframe into the calculation. Similarly, when people actually died from COVID-19 before being confirmed and recorded, CFR will be underestimated.
+
+(b) Unselected predictors  
+There are other county-level variables, such as education and SES status, have not been included in the analysis. future analysis may want to include these variables and control for these effects.
+
+
+(c) Logistic assumption violation  
+The identical or independent assumptions of logistic regression may be violated. In this dataset, people are grouped as clusters, which can also lead to undetected heterogeneity and violate the identical assumption, e.g. people from certain places are easier to be affected with COVID-19. 
+There may also be undetected dependence between trials. For example, healthcare resources may be increased by the death of the others, thus, CFRs are correlated. This will lead to a violation on the independent assumption. Both types of violations can lead to inflation of variance.
+
+
+More studies are encouraged to address these limitations with more available COVID-19 data in the future.
+
